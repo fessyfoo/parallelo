@@ -1,0 +1,101 @@
+#!/usr/bin/perl
+
+# copyright 2010 john "fess" fessenden
+# Released under the Gnu Public License
+
+## yet another parallelizer
+## this one in perl and not specific to ssh. in the hopes of being portable and useful
+
+
+# TODO: handle command  output in an organized fashion.   save to file.  or prefixed with hostname
+# TODO: host range expansion
+
+use Getopt::Long qw(:config
+  require_order
+  pass_through
+  no_ignore_case);
+
+my $run_count = 0;
+my $max_paralllel = 20;
+my %hosts;
+
+sub reap_child 
+  {
+    my $pid = wait ();
+    my $ret = $?;
+    return $pid if $pid == -1;
+    print $hosts{$pid}, ": "; 
+    if ($ret & 127) 
+      {
+        print "died on signal ", ($ret & 127);
+      }
+    else 
+      {
+        print "exited ", $ret >> 8;
+      }
+    print "\n";
+    $run_count-- 
+  }
+#$SIG{CHLD} = sub {};
+
+sub run_cmd 
+  { 
+    my $host = shift;
+    #print "$host: @_\n";
+    reap_child while ($run_count >= $max_paralllel);
+
+    $run_count++;
+    my $fork_status = fork ();
+
+    # failed fork
+    die "fork failed; $!" if ! defined $fork_status;
+
+    # parent
+    return $fork_status if ($fork_status);
+
+    #child
+    exec { $_[0] } @_;
+    # TODO exit with a consistant exit code?
+    die "failed to exec $_[0]: $!\n";
+  }
+
+my @hostfiles;
+my @hosts;
+my $user = $ENV{'USER'};
+
+
+GetOptions 
+  ( 
+    "H|hostfile=s"  => \@hostfiles,
+    "h|host=s"      => \@hosts,
+    "l|user=s"      => \$user,
+    "max-paralllel=i" => \$max_paralllel,
+  ) || die "bad args\n";
+
+for my $hostfile (@hostfiles)
+  {
+    open (FH, $hostfile) || die "failed to open $hostfile: $!\n";
+    while (<FH>) 
+      { 
+        next if /^#/;
+	s/#.*//;
+	s/\s.*//g;
+	push (@hosts, $_);
+      }
+  }
+
+for my $host (@hosts) 
+  {
+    my @args = @ARGV;
+    my $pid;
+    for (@args)
+      { 
+	s/__HOST__/$host/g;
+	s/__USER__/$user/g
+      }
+      $pid = run_cmd ($host, @args);
+      $hosts{$pid} = $host;
+      #print "ran $pid\n";
+  }
+
+1 until (reap_child () == -1);
