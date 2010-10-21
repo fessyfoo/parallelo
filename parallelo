@@ -3,6 +3,8 @@
 # copyright 2010 john "fess" fessenden
 # Released under the Gnu Public License
 
+# testing git.  this comment added on mrbix, to be pushed to herbie
+
 ## yet another parallelizer
 ## this one in perl and not specific to ssh. in the hopes of being portable and useful
 
