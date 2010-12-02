@@ -6,7 +6,6 @@
 ## yet another parallelizer
 ## this one in perl and not specific to ssh. in the hopes of being portable and useful
 
-# ok, what is going on here. test git some more.
 
 # TODO: handle command  output in an organized fashion.   save to file.  or prefixed with hostname
 # TODO: host range expansion
@@ -70,7 +69,7 @@ GetOptions
     "H|hostfile=s"  => \@hostfiles,
     "h|host=s"      => \@hosts,
     "l|user=s"      => \$user,
-    "max-paralllel=i" => \$max_paralllel,
+    "max-parallel=i" => \$max_paralllel,
   ) || die "bad args\n";
 
 for my $hostfile (@hostfiles)
