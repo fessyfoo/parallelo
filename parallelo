@@ -93,11 +93,10 @@ for my $hostfile (@hostfiles)
   }
 
 my $select = new IO::Select ();
-my $running;
 my %err_to_cmd;
 my %out_to_cmd;
-while (@hosts || $running) {
-  while (@hosts && $running <= $max_paralllel) {
+while (@hosts || $select->handles ()) {
+  while (@hosts && $select->handles () <= $max_paralllel * 2) {
     my $host = shift @hosts;
     my @args = @ARGV;
     my @args = map {
@@ -105,17 +104,14 @@ while (@hosts || $running) {
       s/__USER__/$user/g;
       $_;
     } @args;
-    print "host: $host\n";
     my $cmd = run_cmd ($host, @args);
-    $running++;
-    my $cmd_stdout = fileno($cmd->{'stdout'});
-    my $cmd_stderr = fileno($cmd->{'stderr'});
-    print "$cmd_stderr\n";
-    print "$cmd_stdout\n";
+    my $cmd_stdout = $cmd->{'stdout'};
+    my $cmd_stderr = $cmd->{'stderr'};
     $select->add ($cmd_stdout);
     $select->add ($cmd_stderr);
     $err_to_cmd {$cmd_stderr} = $cmd; 
     $out_to_cmd {$cmd_stdout} = $cmd; 
+    print fileno $_, "\n" for ($cmd_stdout, $cmd_stderr);
   }
 
   $SIG{'CHLD'} = 'IGNORE';
@@ -126,6 +122,7 @@ while (@hosts || $running) {
     my $fd_type;
     if (defined $err_to_cmd{$fd}) {
       $cmd  = $err_to_cmd{$fd};
+      $fd_type='stderr';
     } elsif (defined $out_to_cmd{$fd}) {
       $cmd  = $out_to_cmd{$fd};
       $fd_type='stdout';
@@ -136,7 +133,6 @@ while (@hosts || $running) {
       $data = "";
     } else {
       $select->remove ($fd);
-      $running --;
       waitpid ($cmd->{'pid'}, 0);
       # todo handle exit code
     }
