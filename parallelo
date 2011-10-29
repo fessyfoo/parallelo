@@ -45,11 +45,10 @@ sub reap_child
 
 sub run_cmd { 
   my $host = shift;
-  my $in   = new IO::Handle ();
   my $out  = new IO::Handle ();
   my $err  = new IO::Handle ();
 
-  my $pid = open3($in, $out, $err, @_);
+  my $pid = open3(undef, $out, $err, @_);
 
   # failed fork
   die "fork failed; $!" if ! defined $pid;
@@ -60,7 +59,6 @@ sub run_cmd {
       pid    => $pid,
       stderr => $err,
       stdout => $out,
-      stdin  => $in,
       host   => $host
     }
   }
@@ -92,6 +90,12 @@ for my $hostfile (@hostfiles)
       }
   }
 
+my $width=0;
+for (@hosts) {
+  my $len = length $_;
+  $width = $len if $len > $width;
+}
+
 my $select = new IO::Select ();
 my %err_to_cmd;
 my %out_to_cmd;
@@ -111,7 +115,7 @@ while (@hosts || $select->handles ()) {
     $select->add ($cmd_stderr);
     $err_to_cmd {$cmd_stderr} = $cmd; 
     $out_to_cmd {$cmd_stdout} = $cmd; 
-    print fileno $_, "\n" for ($cmd_stdout, $cmd_stderr);
+    #print fileno $_, "\n" for ($cmd_stdout, $cmd_stderr);
   }
 
   $SIG{'CHLD'} = 'IGNORE';
@@ -122,19 +126,35 @@ while (@hosts || $select->handles ()) {
     my $fd_type;
     if (defined $err_to_cmd{$fd}) {
       $cmd  = $err_to_cmd{$fd};
-      $fd_type='stderr';
+      $fd_type='!';
     } elsif (defined $out_to_cmd{$fd}) {
       $cmd  = $out_to_cmd{$fd};
-      $fd_type='stdout';
+      $fd_type=':';
     }
     my $ct = sysread ($fd, $data, 8096);
     if ($ct != 0) {
-      printf "%s (%s): %s\n", $cmd->{'host'}, $fd_type, $_ for split (/\n/, $data);
+      printf 
+        "%-*s %s %s\n", 
+        $width, 
+        $cmd->{'host'},
+        $fd_type,
+        $_ 
+          for split (/\n/, $data);
       $data = "";
     } else {
       $select->remove ($fd);
-      waitpid ($cmd->{'pid'}, 0);
-      # todo handle exit code
+      my $pid = waitpid ($cmd->{'pid'}, 0);
+      my $ret = $?;
+      printf 
+        "%-*s %s %s ", 
+        $width, 
+        $cmd->{'host'};
+      if ($ret & 127) {
+          print "died on signal ", ($ret & 127);
+      } else {
+        print "exited ", $ret >> 8;
+      }
+      print "\n";
     }
   }
 }
