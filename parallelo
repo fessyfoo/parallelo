@@ -9,10 +9,17 @@
 # TODO: handle command  output in an organized fashion.   save to file.  or prefixed with hostname
 # TODO: host range expansion
 
-use Getopt::Long qw(:config
+use strict;
+use IO::Handle;
+use IO::Select;
+use IPC::Open3;
+
+use Getopt::Long qw(
+  :config
   require_order
   pass_through
-  no_ignore_case);
+  no_ignore_case
+);
 
 my $run_count = 0;
 my $max_paralllel = 20;
@@ -33,30 +40,32 @@ sub reap_child
         print "exited ", $ret >> 8;
       }
     print "\n";
-    $run_count-- 
   }
 #$SIG{CHLD} = sub {};
 
-sub run_cmd 
-  { 
-    my $host = shift;
-    #print "$host: @_\n";
-    reap_child while ($run_count >= $max_paralllel);
+sub run_cmd { 
+  my $host = shift;
+  my $in   = new IO::Handle ();
+  my $out  = new IO::Handle ();
+  my $err  = new IO::Handle ();
 
-    $run_count++;
-    my $fork_status = fork ();
+  my $pid = open3($in, $out, $err, @_);
 
-    # failed fork
-    die "fork failed; $!" if ! defined $fork_status;
+  # failed fork
+  die "fork failed; $!" if ! defined $pid;
 
-    # parent
-    return $fork_status if ($fork_status);
-
-    #child
-    exec { $_[0] } @_;
-    # TODO exit with a consistant exit code?
-    die "failed to exec $_[0]: $!\n";
+  # parent
+  if ($pid) {
+    return { 
+      pid    => $pid,
+      stderr => $err,
+      stdout => $out,
+      stdin  => $in,
+      host   => $host
+    }
   }
+  die "unexpected return from open3";
+}
 
 my @hostfiles;
 my @hosts;
@@ -83,18 +92,53 @@ for my $hostfile (@hostfiles)
       }
   }
 
-for my $host (@hosts) 
-  {
+my $select = new IO::Select ();
+my $running;
+my %err_to_cmd;
+my %out_to_cmd;
+while (@hosts || $running) {
+  while (@hosts && $running <= $max_paralllel) {
+    my $host = shift @hosts;
     my @args = @ARGV;
-    my $pid;
-    for (@args)
-      { 
-	s/__HOST__/$host/g;
-	s/__USER__/$user/g
-      }
-      $pid = run_cmd ($host, @args);
-      $hosts{$pid} = $host;
-      #print "ran $pid\n";
+    my @args = map {
+      s/__HOST__/$host/g;
+      s/__USER__/$user/g;
+      $_;
+    } @args;
+    print "host: $host\n";
+    my $cmd = run_cmd ($host, @args);
+    $running++;
+    my $cmd_stdout = fileno($cmd->{'stdout'});
+    my $cmd_stderr = fileno($cmd->{'stderr'});
+    print "$cmd_stderr\n";
+    print "$cmd_stdout\n";
+    $select->add ($cmd_stdout);
+    $select->add ($cmd_stderr);
+    $err_to_cmd {$cmd_stderr} = $cmd; 
+    $out_to_cmd {$cmd_stdout} = $cmd; 
   }
 
-1 until (reap_child () == -1);
+  $SIG{'CHLD'} = 'IGNORE';
+  my @ready = $select->can_read ();
+  for my $fd (@ready) {
+    my $data;
+    my $cmd;
+    my $fd_type;
+    if (defined $err_to_cmd{$fd}) {
+      $cmd  = $err_to_cmd{$fd};
+    } elsif (defined $out_to_cmd{$fd}) {
+      $cmd  = $out_to_cmd{$fd};
+      $fd_type='stdout';
+    }
+    my $ct = sysread ($fd, $data, 8096);
+    if ($ct != 0) {
+      printf "%s (%s): %s\n", $cmd->{'host'}, $fd_type, $_ for split (/\n/, $data);
+      $data = "";
+    } else {
+      $select->remove ($fd);
+      $running --;
+      waitpid ($cmd->{'pid'}, 0);
+      # todo handle exit code
+    }
+  }
+}
