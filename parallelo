@@ -13,6 +13,7 @@ use strict;
 use IO::Handle;
 use IO::Select;
 use IPC::Open3;
+use POSIX qw(:sys_wait_h);
 
 use Getopt::Long qw(
   :config
@@ -25,23 +26,23 @@ my $run_count = 0;
 my $max_paralllel = 20;
 my %hosts;
 
-sub reap_child 
-  {
-    my $pid = wait ();
-    my $ret = $?;
-    return $pid if $pid == -1;
-    print $hosts{$pid}, ": "; 
-    if ($ret & 127) 
-      {
-        print "died on signal ", ($ret & 127);
-      }
-    else 
-      {
-        print "exited ", $ret >> 8;
-      }
-    print "\n";
-  }
-#$SIG{CHLD} = sub {};
+sub reap_child {
+  my $pid = waitpid (-1, WNOHANG);
+  my $ret = $?;
+  return undef unless $pid > 0;
+  return  $pid > 0 ?  ($pid, $ret) : ();
+}
+
+sub make_cmd {
+  my $host = shift;
+  my $user = shift;
+  my @args = @_;
+  return map {
+    s/__HOST__/$host/g;
+    s/__USER__/$user/g;
+    $_;
+  } @args;
+}
 
 sub run_cmd { 
   my $host = shift;
@@ -63,6 +64,36 @@ sub run_cmd {
     }
   }
   die "unexpected return from open3";
+}
+
+sub handle_data {
+  my ($cmd, $data, $fd, $width) = @_;
+  my $is_stdout = $cmd->{'stdout'} == $fd;
+  my $fd_type = $is_stdout ? ':' : '!';
+  my $output  = $is_stdout ? \*STDOUT : \*STDERR;
+  printf $output
+    "%-*s %s %s\n", 
+    $width, 
+    $cmd->{'host'},
+    $fd_type,
+    $_ 
+      for split (/\n/, $data);
+}
+
+sub handle_exit {
+  my $cmd = shift;
+  my $width = shift;
+  my $ret = $cmd->{'ret'};
+  printf 
+    "%-*s %s %s ", 
+    $width, 
+    $cmd->{'host'};
+  if ($ret & 127) {
+      print "died on signal ", ($ret & 127);
+  } else {
+    print "exited ", $ret >> 8;
+  }
+  print "\n";
 }
 
 my @hostfiles;
@@ -97,64 +128,53 @@ for (@hosts) {
 }
 
 my $select = new IO::Select ();
-my %err_to_cmd;
-my %out_to_cmd;
-while (@hosts || $select->handles ()) {
-  while (@hosts && $select->handles () <= $max_paralllel * 2) {
+my %running;
+my %index;
+my $sigchild = 0;
+
+$SIG{'CHLD'} = sub { $sigchild = 1; };
+
+while (@hosts || %running) {
+
+  while (@hosts && %running < $max_paralllel) {
     my $host = shift @hosts;
-    my @args = @ARGV;
-    my @args = map {
-      s/__HOST__/$host/g;
-      s/__USER__/$user/g;
-      $_;
-    } @args;
+    my @args = make_cmd ($host, $user, @ARGV);
     my $cmd = run_cmd ($host, @args);
-    my $cmd_stdout = $cmd->{'stdout'};
-    my $cmd_stderr = $cmd->{'stderr'};
-    $select->add ($cmd_stdout);
-    $select->add ($cmd_stderr);
-    $err_to_cmd {$cmd_stderr} = $cmd; 
-    $out_to_cmd {$cmd_stdout} = $cmd; 
-    #print fileno $_, "\n" for ($cmd_stdout, $cmd_stderr);
+    $select->add ($cmd->{'stdout'}, $cmd->{'stderr'});
+    $index {$_} = $cmd
+      for ($cmd->{'stdout'}, $cmd->{'stderr'}, $cmd->{'pid'});
+    $running{$host} = $cmd;
   }
 
-  $SIG{'CHLD'} = 'IGNORE';
   my @ready = $select->can_read ();
   for my $fd (@ready) {
     my $data;
-    my $cmd;
-    my $fd_type;
-    if (defined $err_to_cmd{$fd}) {
-      $cmd  = $err_to_cmd{$fd};
-      $fd_type='!';
-    } elsif (defined $out_to_cmd{$fd}) {
-      $cmd  = $out_to_cmd{$fd};
-      $fd_type=':';
-    }
+    my $cmd = $index{$fd} || die "unexpected file descriptor!"; 
+
     my $ct = sysread ($fd, $data, 8096);
     if ($ct != 0) {
-      printf 
-        "%-*s %s %s\n", 
-        $width, 
-        $cmd->{'host'},
-        $fd_type,
-        $_ 
-          for split (/\n/, $data);
-      $data = "";
+      handle_data ($cmd, $data, $fd, $width);
     } else {
       $select->remove ($fd);
-      my $pid = waitpid ($cmd->{'pid'}, 0);
-      my $ret = $?;
-      printf 
-        "%-*s %s %s ", 
-        $width, 
-        $cmd->{'host'};
-      if ($ret & 127) {
-          print "died on signal ", ($ret & 127);
-      } else {
-        print "exited ", $ret >> 8;
-      }
-      print "\n";
+      $cmd->{'fd_done_ct'}++;
+    }
+  }
+
+  if ($sigchild) {
+    $sigchild = 0;
+    while (1) {
+      my ($pid, $ret) = reap_child ();
+      last unless $pid;
+      my $cmd = $index{$pid} or die "unexpected pid $pid\n";
+      $cmd->{'ret'} = $ret;
+    }
+  }
+
+  for my $host (keys %running) {
+    my $cmd = $running{$host};
+    if (defined $cmd->{'ret'} && $cmd->{'fd_done_ct'} >= 2) {
+      delete $running{$host};
+      handle_exit ($cmd, $width);
     }
   }
 }
