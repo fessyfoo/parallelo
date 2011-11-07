@@ -146,8 +146,7 @@ while (@hosts || %running) {
     $running{$host} = $cmd;
   }
 
-  my @ready = $select->can_read ();
-  for my $fd (@ready) {
+  for my $fd ($select->can_read ()) {
     my $data;
     my $cmd = $index{$fd} || die "unexpected file descriptor!"; 
 
