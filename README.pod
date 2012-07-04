@@ -1,0 +1,3 @@
+This is the beginnings of yet another parallelizer.  much like xargs.  the idea
+is that it's a single perl script, easy to pass around.  it's intended to focus
+on cli args to make lots of standard parallelizing easy.
